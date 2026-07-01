@@ -31,6 +31,7 @@ FREE_ITEM_CHECK_TTL = timedelta(hours=24)
 GIF_FRAME_DURATION_MS = 1500
 GIF_SIZE = (300, 300)
 MAX_GIF_SIZE_BYTES = 8 * 1024 * 1024
+MAX_REDIRECTS = 5
 
 CATEGORY_COLORS = {
     "3D": 0x8B5CF6,
@@ -46,6 +47,82 @@ DEFAULT_EMBED_COLOR = 0xFC4D50
 HEADERS = {
     "User-Agent": "booth-watcher/0.1 (+https://github.com/ekureaa/booth-watcher)"
 }
+
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+def is_booth_host(hostname: str | None) -> bool:
+    return hostname == "booth.pm" or bool(
+        hostname and hostname.endswith(".booth.pm")
+    )
+
+
+def validate_https_url(url: str, allowed_hosts: set[str] | None = None) -> None:
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port not in {None, 443}
+    ):
+        raise ValueError(f"Unsafe URL: {url}")
+    if allowed_hosts is not None and hostname not in allowed_hosts:
+        raise ValueError(f"Unexpected URL host: {hostname}")
+
+
+def validate_booth_url(url: str) -> None:
+    validate_https_url(url)
+    if not is_booth_host(urlparse(url).hostname):
+        raise ValueError(f"Unexpected BOOTH URL host: {urlparse(url).hostname}")
+
+
+def validated_booth_url(base_url: str, value: str | None) -> str | None:
+    if not value:
+        return None
+    url = urljoin(base_url, value)
+    try:
+        validate_booth_url(url)
+    except ValueError:
+        return None
+    return url
+
+
+def validated_image_url(base_url: str, value: str | None) -> str | None:
+    if not value:
+        return None
+    url = urljoin(base_url, value)
+    try:
+        validate_https_url(url, {"booth.pximg.net"})
+    except ValueError:
+        return None
+    return url
+
+
+def get_with_validated_redirects(
+    url: str,
+    validator,
+) -> requests.Response:
+    current_url = url
+    for _redirect_count in range(MAX_REDIRECTS + 1):
+        validator(current_url)
+        response = requests.get(
+            current_url,
+            headers=HEADERS,
+            timeout=20,
+            allow_redirects=False,
+        )
+        if response.status_code not in REDIRECT_STATUSES:
+            return response
+
+        location = response.headers.get("Location")
+        response.close()
+        if not location:
+            raise ValueError(f"Redirect without Location: {current_url}")
+        current_url = urljoin(current_url, location)
+
+    raise ValueError(f"Too many redirects: {url}")
 
 
 def load_targets() -> list[dict]:
@@ -65,12 +142,16 @@ def load_targets() -> list[dict]:
             raise ValueError(
                 f"targets.json: target {index} requires webhook_name"
             )
-        if not isinstance(url, str) or not url.startswith(
-            ("https://booth.pm/", "http://booth.pm/")
-        ):
+        if not isinstance(url, str):
             raise ValueError(
                 f"targets.json: target {index} requires a BOOTH url"
             )
+        try:
+            validate_https_url(url, {"booth.pm"})
+        except ValueError as error:
+            raise ValueError(
+                f"targets.json: target {index} requires an HTTPS booth.pm url"
+            ) from error
         if not isinstance(free_only, bool):
             raise ValueError(
                 f"targets.json: target {index} requires boolean free_only"
@@ -150,7 +231,7 @@ def save_seen_ids(
 def extract_image_url(link, base_url: str) -> str | None:
     direct_url = link.get("data-original")
     if direct_url:
-        return urljoin(base_url, direct_url)
+        return validated_image_url(base_url, direct_url)
 
     image = link.find("img")
     if image is None:
@@ -159,13 +240,15 @@ def extract_image_url(link, base_url: str) -> str | None:
     for attribute in ("data-src", "data-original", "src"):
         value = image.get(attribute)
         if value and not value.startswith("data:"):
-            return urljoin(base_url, value)
+            if image_url := validated_image_url(base_url, value):
+                return image_url
 
     srcset = image.get("data-srcset") or image.get("srcset")
     if srcset:
         candidates = [part.strip().split()[0] for part in srcset.split(",")]
-        if candidates:
-            return urljoin(base_url, candidates[-1])
+        for candidate in reversed(candidates):
+            if image_url := validated_image_url(base_url, candidate):
+                return image_url
 
     return None
 
@@ -199,12 +282,19 @@ def extract_items(html: str, base_url: str) -> list[dict]:
         item_link = card.select_one(".item-card__title a[href*='/items/']")
         if not item_id or item_link is None:
             continue
+        item_url = validated_booth_url(base_url, item_link.get("href"))
+        item_url_match = (
+            re.fullmatch(r"/(?:[a-z]{2}/)?items/(\d+)", urlparse(item_url).path)
+            if item_url else None
+        )
+        if not item_url_match or item_url_match.group(1) != item_id:
+            continue
 
         title = " ".join(item_link.get_text(" ", strip=True).split())
         category = card.select_one(".item-card__category-anchor")
         if category:
             category_name = category.get_text(" ", strip=True)
-            category_url = urljoin(base_url, category["href"])
+            category_url = validated_booth_url(base_url, category.get("href"))
         elif browse_category:
             category_name, category_url = browse_category
         else:
@@ -223,16 +313,19 @@ def extract_items(html: str, base_url: str) -> list[dict]:
             if badge.get("alt")
         ]
         thumbnail_links = card.select(".item-card__thumbnail-image")
+        shop_url = validated_booth_url(
+            base_url, shop_link.get("href") if shop_link else None
+        )
+        shop_icon_url = validated_image_url(
+            base_url, shop_icon.get("src") if shop_icon else None
+        )
         item = {
             "id": item_id,
             "title": title or card.get("data-product-name") or f"BOOTH item {item_id}",
-            "url": urljoin(base_url, item_link["href"]),
+            "url": item_url,
             "shop_name": shop.get_text(" ", strip=True) if shop else "不明",
-            "shop_url": urljoin(base_url, shop_link["href"]) if shop_link else None,
-            "shop_icon_url": (
-                urljoin(base_url, shop_icon["src"])
-                if shop_icon and shop_icon.get("src") else None
-            ),
+            "shop_url": shop_url,
+            "shop_icon_url": shop_icon_url,
             "category_name": category_name,
             "category_url": category_url,
             "price": price.get_text(" ", strip=True) if price else "不明",
@@ -254,7 +347,9 @@ def extract_items(html: str, base_url: str) -> list[dict]:
     # カード形式が変わった場合も、商品リンクだけは従来どおり検出する。
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        url = urljoin(base_url, href)
+        url = validated_booth_url(base_url, href)
+        if url is None:
+            continue
 
         match = re.search(r"/items/(\d+)", urlparse(url).path)
         if not match:
@@ -296,7 +391,7 @@ def extract_items(html: str, base_url: str) -> list[dict]:
 
 
 def fetch_items(target_url: str) -> list[dict]:
-    response = requests.get(target_url, headers=HEADERS, timeout=20)
+    response = get_with_validated_redirects(target_url, validate_booth_url)
     response.raise_for_status()
     return extract_items(response.text, target_url)
 
@@ -338,7 +433,7 @@ def extract_low_price(html: str) -> float | None:
 
 
 def fetch_is_free_item(item_url: str) -> bool:
-    response = requests.get(item_url, headers=HEADERS, timeout=20)
+    response = get_with_validated_redirects(item_url, validate_booth_url)
     response.raise_for_status()
     low_price = extract_low_price(response.text)
     if low_price is None:
@@ -397,7 +492,10 @@ def create_animated_gif(image_urls: list[str]) -> bytes | None:
 
     for image_url in image_urls:
         try:
-            response = requests.get(image_url, headers=HEADERS, timeout=20)
+            response = get_with_validated_redirects(
+                image_url,
+                lambda url: validate_https_url(url, {"booth.pximg.net"}),
+            )
             response.raise_for_status()
             with Image.open(BytesIO(response.content)) as image:
                 frame = ImageOps.fit(
@@ -438,6 +536,12 @@ def get_category_color(category_name: str) -> int:
 
 
 def send_discord_message(item: dict, webhook_url: str) -> None:
+    parsed_webhook_url = urlparse(webhook_url)
+    validate_https_url(webhook_url, {"discord.com", "discordapp.com"})
+    if not re.fullmatch(
+        r"/api/webhooks/\d+/[A-Za-z0-9._-]+", parsed_webhook_url.path
+    ):
+        raise ValueError("Invalid Discord Webhook URL")
     shop_name = item.get("shop_name", "不明")
     category_name = item.get("category_name", "不明")
     category_url = item.get("category_url")
@@ -495,9 +599,17 @@ def send_discord_message(item: dict, webhook_url: str) -> None:
                 "files[0]": ("booth-item.gif", animated_gif, "image/gif")
             },
             timeout=20,
+            allow_redirects=False,
         )
     else:
-        response = requests.post(webhook_url, json=payload, timeout=20)
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            timeout=20,
+            allow_redirects=False,
+        )
+    if response.status_code in REDIRECT_STATUSES:
+        raise ValueError("Discord Webhook unexpectedly redirected")
     response.raise_for_status()
 
 

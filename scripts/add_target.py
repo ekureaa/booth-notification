@@ -1,5 +1,6 @@
 import argparse
 import getpass
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,7 +27,13 @@ def prompt_booth_url() -> str:
     while True:
         url = prompt_nonempty("BOOTHの検索・一覧URL: ")
         parsed = urlparse(url)
-        if parsed.scheme in {"http", "https"} and parsed.hostname == "booth.pm":
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname == "booth.pm"
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port in {None, 443}
+        ):
             return url
         print("https://booth.pm/ から始まるURLを入力してください。")
 
@@ -38,7 +45,12 @@ def prompt_discord_webhook_url() -> str:
         if (
             parsed.scheme == "https"
             and parsed.hostname in {"discord.com", "discordapp.com"}
-            and parsed.path.startswith("/api/webhooks/")
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port in {None, 443}
+            and re.fullmatch(
+                r"/api/webhooks/\d+/[A-Za-z0-9._-]+", parsed.path
+            )
         ):
             return url
         print("有効なDiscord Webhook URLを入力してください。")
