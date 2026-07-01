@@ -14,6 +14,7 @@ It is currently designed to run on GitHub Actions, not on a dedicated server.
 .github/workflows/booth-watch.yml
 scripts/check_booth.py
 requirements.txt
+requirements.in
 targets.json
 seen_items.json
 ```
@@ -44,5 +45,8 @@ seen_items.json
 * Run `python3 scripts/list_targets.py` to list targets.
 * Run `python3 scripts/remove_target.py` to remove a target interactively.
 * Avoid aggressive crawling. Use a small number of URLs and low frequency.
+* `requirements.in` lists direct Python dependencies. Regenerate the pinned,
+  hashed `requirements.txt` with `pip-compile --generate-hashes
+  --strip-extras requirements.in` after changing dependencies.
 * During testing, the GitHub Actions schedule may run every 5 minutes.
 * For normal use, change it to around once per hour.
