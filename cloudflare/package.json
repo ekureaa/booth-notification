@@ -1,0 +1,13 @@
+{
+  "name": "booth-notification-dispatcher",
+  "private": true,
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "wrangler": "^4.22.0"
+  }
+}

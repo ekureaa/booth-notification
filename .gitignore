@@ -1,0 +1,10 @@
+# Local Discord webhook memo (contains secrets)
+secrets.local.json
+
+# Cloudflare Workers local files
+cloudflare/.dev.vars
+cloudflare/.env*
+cloudflare/node_modules/
+cloudflare/.wrangler/
+
+venv/

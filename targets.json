@@ -1,0 +1,24 @@
+{
+  "targets": [
+    {
+      "webhook_name": "vrchat",
+      "url": "https://booth.pm/ja/search/VRChat?sort=new",
+      "free_only": false
+    },
+    {
+      "webhook_name": "komado",
+      "url": "https://booth.pm/ja/browse/3D%E8%A1%A3%E8%A3%85?sort=new&or_words%5B%5D=chiffon&or_words%5B%5D=chocolat&or_words%5B%5D=lime&or_words%5B%5D=plum",
+      "free_only": false
+    },
+    {
+      "webhook_name": "chocolat",
+      "url": "https://booth.pm/ja/browse/3D%E3%83%A2%E3%83%87%E3%83%AB?q=chocolat&sort=new",
+      "free_only": false
+    },
+    {
+      "webhook_name": "vrchat-free",
+      "url": "https://booth.pm/ja/search/vrchat?sort=new",
+      "free_only": true
+    }
+  ]
+}
