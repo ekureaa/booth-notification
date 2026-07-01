@@ -1,6 +1,7 @@
 # Cloudflare Worker dispatcher
 
 Cloudflare Workers Cron TriggersからGitHub Actionsの`workflow_dispatch`を実行する。
+アプリ本体の設定と操作方法は[../README.md](../README.md)を参照する。
 
 ## 1. GitHub tokenを作成
 
@@ -18,27 +19,11 @@ npx wrangler login
 npx wrangler secret put GITHUB_TOKEN
 ```
 
-プロンプトへGitHub tokenを入力する。Tokenをソースコードや
-`wrangler.jsonc`へ記載しないこと。
-
-## 3. ローカルテスト
-
-`.dev.vars`を作成して次の形式でTokenを記載する。このファイルはGitから除外される。
-
-```dotenv
-GITHUB_TOKEN="github_pat_..."
-```
-
-```bash
-npm run dev
-curl "http://localhost:8787/__scheduled?cron=47+*+*+*+*"
-```
-
-## 4. デプロイ
+## 3. デプロイ
 
 ```bash
 npm run check
 npm run deploy
 ```
 
-Cron Triggerの変更はCloudflare全体への反映に最大15分かかることがある。
+現在の設定では毎時0分（`0 * * * *`、UTC）に実行する。
