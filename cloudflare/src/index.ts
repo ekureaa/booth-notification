@@ -27,15 +27,26 @@ async function dispatchWorkflow(env: Env): Promise<void> {
     body: JSON.stringify({ ref: "main" }),
   });
 
-  if (response.status !== 204) {
-    const responseBody = await response.text();
+  const responseBody = await response.text();
+  if (!response.ok) {
     throw new Error(
       `GitHub workflow dispatch failed (${response.status}): ${responseBody}`,
     );
   }
 
+  let responseData: unknown;
+  if (responseBody) {
+    try {
+      responseData = JSON.parse(responseBody);
+    } catch {
+      responseData = responseBody;
+    }
+  }
+
   console.log("GitHub workflow_dispatch accepted", {
+    status: response.status,
     scheduledAt: new Date().toISOString(),
+    response: responseData,
   });
 }
 
