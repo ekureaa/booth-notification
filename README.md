@@ -1,4 +1,4 @@
-# BOOTH新着通知
+# booth-notification
 
 BOOTHの検索・一覧URLを定期確認し、新着商品をDiscordへ通知します。
 GitHub Actionsで動作し、Cloudflare Workerから毎時0分に起動します。
