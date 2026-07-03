@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -478,9 +479,7 @@ def filter_free_items(
 
 
 def create_animated_gif(image_urls: list[str]) -> bytes | None:
-    frames = []
-
-    for image_url in image_urls:
+    def fetch_frame(image_url: str) -> Image.Image | None:
         try:
             response = get_with_validated_redirects(
                 image_url,
@@ -493,9 +492,17 @@ def create_animated_gif(image_urls: list[str]) -> bytes | None:
                     GIF_SIZE,
                     method=Image.Resampling.LANCZOS,
                 )
-                frames.append(frame)
+                return frame
         except Exception as e:
             print(f"Failed to fetch GIF frame {image_url}: {e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        frames = [
+            frame
+            for frame in executor.map(fetch_frame, image_urls)
+            if frame is not None
+        ]
 
     if len(frames) < 2:
         return None
@@ -648,7 +655,7 @@ def main() -> None:
     current_items_by_target: list[tuple[str, list[dict]]] = []
     successfully_fetched_channels = set()
 
-    for target in targets:
+    for target_index, target in enumerate(targets):
         target_url = target["url"]
         webhook_name = target["webhook_name"]
         target_started_at = time.perf_counter()
@@ -684,7 +691,8 @@ def main() -> None:
         )
 
         # BOOTHへの連続アクセスを避ける
-        time.sleep(3)
+        if target_index < len(targets) - 1:
+            time.sleep(2)
 
     for channel in successfully_fetched_channels - initialized_channels:
         current_ids = set(current_items_by_channel.get(channel, {}))
@@ -718,22 +726,27 @@ def main() -> None:
 
     notified_count = 0
     animated_gif_cache: dict[str, bytes | None] = {}
+    notification_queue = [
+        notification
+        for notify_items in notify_groups
+        for notification in reversed(notify_items)
+    ]
 
-    for notify_items in notify_groups:
-        for item, webhook_name in reversed(notify_items):
-            print(f"Notify ({webhook_name}): {item['title']} {item['url']}")
-            try:
-                send_discord_message(
-                    item,
-                    webhook_urls[webhook_name],
-                    animated_gif_cache,
-                )
-            except Exception as e:
-                print(f"Failed to notify Discord: {e}")
-            else:
-                seen_ids_by_channel[webhook_name].add(item["id"])
-                notified_count += 1
+    for notification_index, (item, webhook_name) in enumerate(notification_queue):
+        print(f"Notify ({webhook_name}): {item['title']} {item['url']}")
+        try:
+            send_discord_message(
+                item,
+                webhook_urls[webhook_name],
+                animated_gif_cache,
+            )
+        except Exception as e:
+            print(f"Failed to notify Discord: {e}")
+        else:
+            seen_ids_by_channel[webhook_name].add(item["id"])
+            notified_count += 1
 
+        if notification_index < len(notification_queue) - 1:
             time.sleep(1)
 
     save_seen_ids(seen_ids_by_channel, free_item_checks)
