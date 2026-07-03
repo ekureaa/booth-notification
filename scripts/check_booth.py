@@ -2,7 +2,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import (
@@ -27,7 +27,6 @@ MAX_ITEMS_PER_TARGET = 40
 MAX_NOTIFY_PER_TARGET = 20
 MAX_SEEN_IDS = 500
 MAX_FREE_ITEM_CHECKS = 500
-FREE_ITEM_CHECK_TTL = timedelta(hours=24)
 GIF_FRAME_DURATION_MS = 1500
 GIF_SIZE = (300, 300)
 MAX_GIF_SIZE_BYTES = 8 * 1024 * 1024
@@ -444,17 +443,9 @@ def fetch_is_free_item(item_url: str) -> bool:
 def get_cached_free_status(
     item_id: str,
     free_item_checks: dict[str, dict],
-    now: datetime,
 ) -> bool | None:
     cached = free_item_checks.get(item_id)
     if not isinstance(cached, dict) or not isinstance(cached.get("is_free"), bool):
-        return None
-
-    try:
-        checked_at = datetime.fromisoformat(cached["checked_at"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if checked_at.tzinfo is None or now - checked_at >= FREE_ITEM_CHECK_TTL:
         return None
     return cached["is_free"]
 
@@ -465,8 +456,7 @@ def filter_free_items(
     free_items = []
 
     for item in items:
-        now = datetime.now(timezone.utc)
-        is_free = get_cached_free_status(item["id"], free_item_checks, now)
+        is_free = get_cached_free_status(item["id"], free_item_checks)
         if is_free is None:
             try:
                 is_free = fetch_is_free_item(item["url"])
@@ -476,7 +466,7 @@ def filter_free_items(
 
             free_item_checks[item["id"]] = {
                 "is_free": is_free,
-                "checked_at": now.isoformat(),
+                "checked_at": datetime.now(timezone.utc).isoformat(),
             }
             time.sleep(1)
 
@@ -511,6 +501,7 @@ def create_animated_gif(image_urls: list[str]) -> bytes | None:
         return None
 
     output = BytesIO()
+    encoding_started_at = time.perf_counter()
     frames[0].save(
         output,
         format="GIF",
@@ -518,8 +509,12 @@ def create_animated_gif(image_urls: list[str]) -> bytes | None:
         append_images=frames[1:],
         duration=GIF_FRAME_DURATION_MS,
         loop=0,
-        optimize=True,
+        optimize=False,
         disposal=2,
+    )
+    print(
+        f"GIF encoding time ({len(frames)} frames): "
+        f"{time.perf_counter() - encoding_started_at:.2f}s"
     )
     gif_data = output.getvalue()
     if len(gif_data) > MAX_GIF_SIZE_BYTES:
@@ -535,7 +530,11 @@ def get_category_color(category_name: str) -> int:
     return DEFAULT_EMBED_COLOR
 
 
-def send_discord_message(item: dict, webhook_url: str) -> None:
+def send_discord_message(
+    item: dict,
+    webhook_url: str,
+    animated_gif_cache: dict[str, bytes | None],
+) -> None:
     parsed_webhook_url = urlparse(webhook_url)
     validate_https_url(webhook_url, {"discord.com", "discordapp.com"})
     if not re.fullmatch(
@@ -581,7 +580,19 @@ def send_discord_message(item: dict, webhook_url: str) -> None:
             "inline": False,
         })
     image_urls = item.get("image_urls", [])
-    animated_gif = create_animated_gif(image_urls) if len(image_urls) > 1 else None
+    animated_gif = None
+    if len(image_urls) > 1:
+        item_id = item["id"]
+        if item_id not in animated_gif_cache:
+            gif_started_at = time.perf_counter()
+            animated_gif_cache[item_id] = create_animated_gif(image_urls)
+            print(
+                f"GIF processing time (item {item_id}, {len(image_urls)} images): "
+                f"{time.perf_counter() - gif_started_at:.2f}s"
+            )
+        else:
+            print(f"Reuse cached GIF (item {item_id})")
+        animated_gif = animated_gif_cache[item_id]
     if animated_gif:
         embed["image"] = {"url": "attachment://booth-item.gif"}
     elif item.get("image_url"):
@@ -640,6 +651,7 @@ def main() -> None:
     for target in targets:
         target_url = target["url"]
         webhook_name = target["webhook_name"]
+        target_started_at = time.perf_counter()
         print(f"Checking ({webhook_name}): {target_url}")
         try:
             fetch_url = (
@@ -654,6 +666,10 @@ def main() -> None:
                 print(f"  - {item['id']} {item['title']} {item['url']}")
         except Exception as e:
             print(f"Failed to fetch {target_url}: {e}")
+            print(
+                f"Target processing time ({webhook_name}): "
+                f"{time.perf_counter() - target_started_at:.2f}s"
+            )
             continue
 
         successfully_fetched_channels.add(webhook_name)
@@ -661,6 +677,11 @@ def main() -> None:
         channel_items = current_items_by_channel.setdefault(webhook_name, {})
         for item in items:
             channel_items.setdefault(item["id"], item)
+
+        print(
+            f"Target processing time ({webhook_name}): "
+            f"{time.perf_counter() - target_started_at:.2f}s"
+        )
 
         # BOOTHへの連続アクセスを避ける
         time.sleep(3)
@@ -696,12 +717,17 @@ def main() -> None:
         notify_groups.append(target_items)
 
     notified_count = 0
+    animated_gif_cache: dict[str, bytes | None] = {}
 
     for notify_items in notify_groups:
         for item, webhook_name in reversed(notify_items):
             print(f"Notify ({webhook_name}): {item['title']} {item['url']}")
             try:
-                send_discord_message(item, webhook_urls[webhook_name])
+                send_discord_message(
+                    item,
+                    webhook_urls[webhook_name],
+                    animated_gif_cache,
+                )
             except Exception as e:
                 print(f"Failed to notify Discord: {e}")
             else:
