@@ -182,7 +182,7 @@ def load_webhook_urls() -> dict[str, str]:
 
 
 def load_seen_ids() -> tuple[
-    dict[str, set[str]], set[str] | None, dict[str, dict]
+    dict[str, list[str]], list[str] | None, dict[str, dict]
 ]:
     if not SEEN_FILE.exists():
         return {}, None, {}
@@ -192,21 +192,27 @@ def load_seen_ids() -> tuple[
         channels = data["channels"]
         if not isinstance(channels, dict):
             raise ValueError("seen_items.json: channels must be an object")
-        seen_ids_by_channel = {
-            name: set(item_ids)
-            for name, item_ids in channels.items()
-        }
+        newest_first = data.get("seen_order") == "newest_first"
+        seen_ids_by_channel = {}
+        for name, item_ids in channels.items():
+            if not isinstance(item_ids, list):
+                raise ValueError(
+                    f"seen_items.json: channel {name} must be an array"
+                )
+            seen_ids_by_channel[name] = (
+                list(item_ids) if newest_first else list(reversed(item_ids))
+            )
         free_item_checks = data.get("free_item_checks", {})
         if not isinstance(free_item_checks, dict):
             raise ValueError("seen_items.json: free_item_checks must be an object")
         return seen_ids_by_channel, None, free_item_checks
 
     # 旧形式は起動時に設定済みの全通知先へ引き継ぐ。
-    return {}, set(data.get("seen_ids", [])), {}
+    return {}, list(reversed(data.get("seen_ids", []))), {}
 
 
 def save_seen_ids(
-    seen_ids_by_channel: dict[str, set[str]],
+    seen_ids_by_channel: dict[str, list[str]],
     free_item_checks: dict[str, dict],
 ) -> None:
     latest_free_item_checks = dict(
@@ -216,8 +222,9 @@ def save_seen_ids(
         )[-MAX_FREE_ITEM_CHECKS:]
     )
     data = {
+        "seen_order": "newest_first",
         "channels": {
-            channel: sorted(item_ids, key=int)[-MAX_SEEN_IDS:]
+            channel: item_ids[:MAX_SEEN_IDS]
             for channel, item_ids in sorted(seen_ids_by_channel.items())
         },
         "free_item_checks": latest_free_item_checks,
@@ -226,6 +233,13 @@ def save_seen_ids(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def mark_item_seen(item_ids: list[str], item_id: str) -> None:
+    if item_id in item_ids:
+        item_ids.remove(item_id)
+    item_ids.insert(0, item_id)
+    del item_ids[MAX_SEEN_IDS:]
 
 
 def extract_image_url(link, base_url: str) -> str | None:
@@ -647,7 +661,7 @@ def main() -> None:
     configured_channels = {target["webhook_name"] for target in targets}
     if legacy_seen_ids is not None:
         seen_ids_by_channel.update(
-            {channel: set(legacy_seen_ids) for channel in configured_channels}
+            {channel: list(legacy_seen_ids) for channel in configured_channels}
         )
 
     initialized_channels = set(seen_ids_by_channel)
@@ -695,7 +709,7 @@ def main() -> None:
             time.sleep(2)
 
     for channel in successfully_fetched_channels - initialized_channels:
-        current_ids = set(current_items_by_channel.get(channel, {}))
+        current_ids = list(current_items_by_channel.get(channel, {}))
         seen_ids_by_channel[channel] = current_ids
         print(f"First run for {channel}: save current items only, no notification.")
 
@@ -743,7 +757,7 @@ def main() -> None:
         except Exception as e:
             print(f"Failed to notify Discord: {e}")
         else:
-            seen_ids_by_channel[webhook_name].add(item["id"])
+            mark_item_seen(seen_ids_by_channel[webhook_name], item["id"])
             notified_count += 1
 
         if notification_index < len(notification_queue) - 1:
