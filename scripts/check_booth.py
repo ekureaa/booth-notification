@@ -626,28 +626,40 @@ def send_discord_message(
         "embeds": [embed]
     }
 
-    try:
-        if animated_gif:
-            response = requests.post(
-                webhook_url,
-                data={"payload_json": json.dumps(payload, ensure_ascii=False)},
-                files={
-                    "files[0]": ("booth-item.gif", animated_gif, "image/gif")
-                },
-                timeout=20,
-                allow_redirects=False,
-            )
-        else:
-            response = requests.post(
+    def post_to_discord(gif_data: bytes | None = None) -> requests.Response:
+        try:
+            if gif_data:
+                return requests.post(
+                    webhook_url,
+                    data={"payload_json": json.dumps(payload, ensure_ascii=False)},
+                    files={
+                        "files[0]": ("booth-item.gif", gif_data, "image/gif")
+                    },
+                    timeout=20,
+                    allow_redirects=False,
+                )
+            return requests.post(
                 webhook_url,
                 json=payload,
                 timeout=20,
                 allow_redirects=False,
             )
-    except requests.RequestException as error:
-        raise RuntimeError(
-            f"Discord webhook request failed: {type(error).__name__}"
-        ) from None
+        except requests.RequestException as error:
+            raise RuntimeError(
+                f"Discord webhook request failed: {type(error).__name__}"
+            ) from None
+
+    response = post_to_discord(animated_gif)
+
+    try:
+        discord_error_code = response.json().get("code")
+    except (requests.JSONDecodeError, AttributeError, TypeError):
+        discord_error_code = None
+
+    if not response.ok and discord_error_code == 20009 and "image" in embed:
+        print(f"Discord rejected the image; retry without it (item {item['id']})")
+        del embed["image"]
+        response = post_to_discord()
 
     if response.status_code in REDIRECT_STATUSES:
         raise ValueError("Discord Webhook unexpectedly redirected")
