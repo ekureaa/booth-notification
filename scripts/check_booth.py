@@ -557,7 +557,10 @@ def send_discord_message(
     animated_gif_cache: dict[str, bytes | None],
 ) -> None:
     parsed_webhook_url = urlparse(webhook_url)
-    validate_https_url(webhook_url, {"discord.com", "discordapp.com"})
+    try:
+        validate_https_url(webhook_url, {"discord.com", "discordapp.com"})
+    except ValueError:
+        raise ValueError("Invalid Discord Webhook URL") from None
     if not re.fullmatch(
         r"/api/webhooks/\d+/[A-Za-z0-9._-]+", parsed_webhook_url.path
     ):
@@ -623,26 +626,36 @@ def send_discord_message(
         "embeds": [embed]
     }
 
-    if animated_gif:
-        response = requests.post(
-            webhook_url,
-            data={"payload_json": json.dumps(payload, ensure_ascii=False)},
-            files={
-                "files[0]": ("booth-item.gif", animated_gif, "image/gif")
-            },
-            timeout=20,
-            allow_redirects=False,
-        )
-    else:
-        response = requests.post(
-            webhook_url,
-            json=payload,
-            timeout=20,
-            allow_redirects=False,
-        )
+    try:
+        if animated_gif:
+            response = requests.post(
+                webhook_url,
+                data={"payload_json": json.dumps(payload, ensure_ascii=False)},
+                files={
+                    "files[0]": ("booth-item.gif", animated_gif, "image/gif")
+                },
+                timeout=20,
+                allow_redirects=False,
+            )
+        else:
+            response = requests.post(
+                webhook_url,
+                json=payload,
+                timeout=20,
+                allow_redirects=False,
+            )
+    except requests.RequestException as error:
+        raise RuntimeError(
+            f"Discord webhook request failed: {type(error).__name__}"
+        ) from None
+
     if response.status_code in REDIRECT_STATUSES:
         raise ValueError("Discord Webhook unexpectedly redirected")
-    response.raise_for_status()
+    if not response.ok:
+        response_body = response.text.replace(webhook_url, "[REDACTED]")[:1000]
+        raise RuntimeError(
+            f"Discord webhook failed ({response.status_code}): {response_body}"
+        )
 
 
 def main() -> None:
