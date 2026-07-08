@@ -32,6 +32,8 @@ GIF_FRAME_DURATION_MS = 1500
 GIF_SIZE = (300, 300)
 MAX_GIF_SIZE_BYTES = 8 * 1024 * 1024
 MAX_REDIRECTS = 5
+MAX_DISCORD_RATE_LIMIT_RETRIES = 3
+DISCORD_RATE_LIMIT_BUFFER_SECONDS = 0.1
 
 CATEGORY_COLORS = {
     "3D": 0x8B5CF6,
@@ -49,6 +51,27 @@ HEADERS = {
 }
 
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+def parse_discord_retry_after(response: requests.Response) -> float:
+    for header_name in ("Retry-After", "X-RateLimit-Reset-After"):
+        header_value = response.headers.get(header_name)
+        if header_value is None:
+            continue
+        try:
+            return max(0.0, float(header_value))
+        except ValueError:
+            pass
+
+    try:
+        retry_after = response.json().get("retry_after")
+    except (requests.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return 1.0
+
+    try:
+        return max(0.0, float(retry_after))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def is_booth_host(hostname: str | None) -> bool:
@@ -649,7 +672,28 @@ def send_discord_message(
                 f"Discord webhook request failed: {type(error).__name__}"
             ) from None
 
-    response = post_to_discord(animated_gif)
+    def post_with_rate_limit_retries(
+        gif_data: bytes | None = None,
+    ) -> requests.Response:
+        for attempt in range(MAX_DISCORD_RATE_LIMIT_RETRIES + 1):
+            response = post_to_discord(gif_data)
+            if response.status_code != 429:
+                return response
+            if attempt >= MAX_DISCORD_RATE_LIMIT_RETRIES:
+                return response
+
+            retry_after = parse_discord_retry_after(response)
+            wait_seconds = retry_after + DISCORD_RATE_LIMIT_BUFFER_SECONDS
+            print(
+                "Discord rate limited; "
+                f"retry after {wait_seconds:.2f}s "
+                f"(attempt {attempt + 1}/{MAX_DISCORD_RATE_LIMIT_RETRIES})"
+            )
+            time.sleep(wait_seconds)
+
+        return response
+
+    response = post_with_rate_limit_retries(animated_gif)
 
     try:
         discord_error_code = response.json().get("code")
@@ -659,7 +703,7 @@ def send_discord_message(
     if not response.ok and discord_error_code == 20009 and "image" in embed:
         print(f"Discord rejected the image; retry without it (item {item['id']})")
         del embed["image"]
-        response = post_to_discord()
+        response = post_with_rate_limit_retries()
 
     if response.status_code in REDIRECT_STATUSES:
         raise ValueError("Discord Webhook unexpectedly redirected")
@@ -668,6 +712,18 @@ def send_discord_message(
         raise RuntimeError(
             f"Discord webhook failed ({response.status_code}): {response_body}"
         )
+    if response.headers.get("X-RateLimit-Remaining") == "0":
+        reset_after = response.headers.get("X-RateLimit-Reset-After")
+        if reset_after is not None:
+            wait_seconds = (
+                parse_discord_retry_after(response)
+                + DISCORD_RATE_LIMIT_BUFFER_SECONDS
+            )
+            print(
+                "Discord rate limit bucket exhausted; "
+                f"wait {wait_seconds:.2f}s before next notification"
+            )
+            time.sleep(wait_seconds)
 
 
 def main() -> None:
@@ -786,7 +842,7 @@ def main() -> None:
             notified_count += 1
 
         if notification_index < len(notification_queue) - 1:
-            time.sleep(1)
+            time.sleep(0.5)
 
     save_seen_ids(seen_ids_by_channel, free_item_checks)
 
